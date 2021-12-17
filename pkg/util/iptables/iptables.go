@@ -421,6 +421,7 @@ func (runner *runner) restoreInternal(args []string, data []byte, flush FlushFla
 	cmd.SetStdin(bytes.NewBuffer(data))
 	b, err := cmd.CombinedOutput()
 	if err != nil {
+		//git test
 		return fmt.Errorf("%v (%s)", err, b)
 	}
 	return nil
