@@ -21,6 +21,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"k8s.io/kubernetes/pkg/proxy"
+	"k8s.io/kubernetes/pkg/util/conntrack"
+	utilexec "k8s.io/utils/exec"
 	"net"
 	"net/http"
 	"strconv"
@@ -547,4 +550,40 @@ func RevertPorts(replacementPortsMap, originalPortsMap map[netutils.LocalPort]ne
 // CountBytesLines counts the number of lines in a bytes slice
 func CountBytesLines(b []byte) int {
 	return bytes.Count(b, []byte{'\n'})
+}
+
+// DeleteEndpointConnections After a UDP or SCTP endpoint has been removed, we must flush any pending conntrack entries to it, or else we
+// risk sending more traffic to it, all of which will be lost.
+// This assumes the proxier mutex is held
+func DeleteEndpointConnections(exec utilexec.Interface, serviceMap proxy.ServiceMap, connectionMap []proxy.ServiceEndpoint, clearConntrackEntriesFunc conntrack.ClearConntrackEntriesFunc) {
+	for _, epSvcPair := range connectionMap {
+		if svcInfo, ok := serviceMap[epSvcPair.ServicePortName]; ok && conntrack.IsClearConntrackNeeded(svcInfo.Protocol()) {
+			endpointIP := IPPart(epSvcPair.Endpoint)
+			svcProto := svcInfo.Protocol()
+			nodePort := svcInfo.NodePort()
+			var err error
+			if clearConntrackEntriesFunc != nil && nodePort != 0 {
+				err = clearConntrackEntriesFunc(exec, endpointIP, nodePort, svcProto)
+				if err != nil {
+					klog.ErrorS(err, "Failed to delete nodeport-related endpoint connections", "servicePortName", epSvcPair.ServicePortName)
+				}
+			}
+			err = conntrack.ClearEntriesForNAT(exec, svcInfo.ClusterIP().String(), endpointIP, svcProto)
+			if err != nil {
+				klog.ErrorS(err, "Failed to delete endpoint connections", "servicePortName", epSvcPair.ServicePortName)
+			}
+			for _, extIP := range svcInfo.ExternalIPStrings() {
+				err := conntrack.ClearEntriesForNAT(exec, extIP, endpointIP, svcProto)
+				if err != nil {
+					klog.ErrorS(err, "Failed to delete endpoint connections for externalIP", "servicePortName", epSvcPair.ServicePortName, "externalIP", extIP)
+				}
+			}
+			for _, lbIP := range svcInfo.LoadBalancerIPStrings() {
+				err := conntrack.ClearEntriesForNAT(exec, lbIP, endpointIP, svcProto)
+				if err != nil {
+					klog.ErrorS(err, "Failed to delete endpoint connections for LoadBalancerIP", "servicePortName", epSvcPair.ServicePortName, "loadBalancerIP", lbIP)
+				}
+			}
+		}
+	}
 }

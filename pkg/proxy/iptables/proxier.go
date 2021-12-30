@@ -240,6 +240,10 @@ type Proxier struct {
 	// networkInterfacer defines an interface for several net library functions.
 	// Inject for test purpose.
 	networkInterfacer utilproxy.NetworkInterfacer
+
+	// clearConntrackEntries is used to delete the conntrack entry of {dest IP, port}
+	// for the specified connection on iptables mode.
+	clearConntrackEntries conntrack.ClearConntrackEntriesFunc
 }
 
 // Proxier implements proxy.Provider
@@ -322,6 +326,7 @@ func NewProxier(ipt utiliptables.Interface,
 		natRules:                 utilproxy.LineBuffer{},
 		nodePortAddresses:        nodePortAddresses,
 		networkInterfacer:        utilproxy.RealNetwork{},
+		clearConntrackEntries:    conntrack.ClearEntriesForPortNAT,
 	}
 
 	burstSyncs := 2
@@ -722,43 +727,6 @@ func servicePortEndpointChainName(servicePortName string, protocol string, endpo
 	hash := sha256.Sum256([]byte(servicePortName + protocol + endpoint))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
 	return utiliptables.Chain("KUBE-SEP-" + encoded[:16])
-}
-
-// After a UDP or SCTP endpoint has been removed, we must flush any pending conntrack entries to it, or else we
-// risk sending more traffic to it, all of which will be lost.
-// This assumes the proxier mutex is held
-// TODO: move it to util
-func (proxier *Proxier) deleteEndpointConnections(connectionMap []proxy.ServiceEndpoint) {
-	for _, epSvcPair := range connectionMap {
-		if svcInfo, ok := proxier.serviceMap[epSvcPair.ServicePortName]; ok && conntrack.IsClearConntrackNeeded(svcInfo.Protocol()) {
-			endpointIP := utilproxy.IPPart(epSvcPair.Endpoint)
-			nodePort := svcInfo.NodePort()
-			svcProto := svcInfo.Protocol()
-			var err error
-			if nodePort != 0 {
-				err = conntrack.ClearEntriesForPortNAT(proxier.exec, endpointIP, nodePort, svcProto)
-				if err != nil {
-					klog.ErrorS(err, "Failed to delete nodeport-related endpoint connections", "servicePortName", epSvcPair.ServicePortName)
-				}
-			}
-			err = conntrack.ClearEntriesForNAT(proxier.exec, svcInfo.ClusterIP().String(), endpointIP, svcProto)
-			if err != nil {
-				klog.ErrorS(err, "Failed to delete endpoint connections", "servicePortName", epSvcPair.ServicePortName)
-			}
-			for _, extIP := range svcInfo.ExternalIPStrings() {
-				err := conntrack.ClearEntriesForNAT(proxier.exec, extIP, endpointIP, svcProto)
-				if err != nil {
-					klog.ErrorS(err, "Failed to delete endpoint connections for externalIP", "servicePortName", epSvcPair.ServicePortName, "externalIP", extIP)
-				}
-			}
-			for _, lbIP := range svcInfo.LoadBalancerIPStrings() {
-				err := conntrack.ClearEntriesForNAT(proxier.exec, lbIP, endpointIP, svcProto)
-				if err != nil {
-					klog.ErrorS(err, "Failed to delete endpoint connections for LoadBalancerIP", "servicePortName", epSvcPair.ServicePortName, "loadBalancerIP", lbIP)
-				}
-			}
-		}
-	}
 }
 
 const endpointChainsNumberThreshold = 1000
@@ -1577,7 +1545,8 @@ func (proxier *Proxier) syncProxyRules() {
 		}
 	}
 	klog.V(4).InfoS("Deleting stale endpoint connections", "endpoints", endpointUpdateResult.StaleEndpoints)
-	proxier.deleteEndpointConnections(endpointUpdateResult.StaleEndpoints)
+
+	utilproxy.DeleteEndpointConnections(proxier.exec, proxier.serviceMap, endpointUpdateResult.StaleEndpoints, proxier.clearConntrackEntries)
 }
 
 func (proxier *Proxier) openPort(lp netutils.LocalPort, replacementPortsMap map[netutils.LocalPort]netutils.Closeable) {

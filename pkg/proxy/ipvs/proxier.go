@@ -1675,7 +1675,8 @@ func (proxier *Proxier) syncProxyRules() {
 			klog.ErrorS(err, "Failed to delete stale service IP connections", "IP", svcIP)
 		}
 	}
-	proxier.deleteEndpointConnections(endpointUpdateResult.StaleEndpoints)
+	utilproxy.DeleteEndpointConnections(proxier.exec, proxier.serviceMap, endpointUpdateResult.StaleEndpoints, nil)
+
 }
 
 // writeIptablesRules write all iptables rules to proxier.natRules or proxier.FilterRules that ipvs proxier needed
@@ -1939,34 +1940,6 @@ func (proxier *Proxier) getExistingChains(buffer *bytes.Buffer, table utiliptabl
 		return utiliptables.GetChainLines(table, buffer.Bytes())
 	}
 	return nil
-}
-
-// After a UDP or SCTP endpoint has been removed, we must flush any pending conntrack entries to it, or else we
-// risk sending more traffic to it, all of which will be lost (because UDP).
-// This assumes the proxier mutex is held
-func (proxier *Proxier) deleteEndpointConnections(connectionMap []proxy.ServiceEndpoint) {
-	for _, epSvcPair := range connectionMap {
-		if svcInfo, ok := proxier.serviceMap[epSvcPair.ServicePortName]; ok && conntrack.IsClearConntrackNeeded(svcInfo.Protocol()) {
-			endpointIP := utilproxy.IPPart(epSvcPair.Endpoint)
-			svcProto := svcInfo.Protocol()
-			err := conntrack.ClearEntriesForNAT(proxier.exec, svcInfo.ClusterIP().String(), endpointIP, svcProto)
-			if err != nil {
-				klog.ErrorS(err, "Failed to delete endpoint connections", "servicePortName", epSvcPair.ServicePortName)
-			}
-			for _, extIP := range svcInfo.ExternalIPStrings() {
-				err := conntrack.ClearEntriesForNAT(proxier.exec, extIP, endpointIP, svcProto)
-				if err != nil {
-					klog.ErrorS(err, "Failed to delete endpoint connections for externalIP", "servicePortName", epSvcPair.ServicePortName, "IP", extIP)
-				}
-			}
-			for _, lbIP := range svcInfo.LoadBalancerIPStrings() {
-				err := conntrack.ClearEntriesForNAT(proxier.exec, lbIP, endpointIP, svcProto)
-				if err != nil {
-					klog.ErrorS(err, "Failed to delete endpoint connections for LoadBalancerIP", "servicePortName", epSvcPair.ServicePortName, "IP", lbIP)
-				}
-			}
-		}
-	}
 }
 
 func (proxier *Proxier) syncService(svcName string, vs *utilipvs.VirtualServer, bindAddr bool, bindedAddresses sets.String) error {

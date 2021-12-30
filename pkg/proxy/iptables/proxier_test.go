@@ -19,6 +19,8 @@ package iptables
 import (
 	"bytes"
 	"fmt"
+	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/util/conntrack"
 	"net"
 	"reflect"
 	"regexp"
@@ -38,7 +40,6 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/component-base/metrics/testutil"
-	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/proxy/metrics"
@@ -48,7 +49,6 @@ import (
 	proxyutiliptables "k8s.io/kubernetes/pkg/proxy/util/iptables"
 	utilproxytest "k8s.io/kubernetes/pkg/proxy/util/testing"
 	"k8s.io/kubernetes/pkg/util/async"
-	"k8s.io/kubernetes/pkg/util/conntrack"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 	iptablestest "k8s.io/kubernetes/pkg/util/iptables/testing"
 	"k8s.io/utils/exec"
@@ -281,7 +281,7 @@ func TestDeleteEndpointConnectionsIPv4(t *testing.T) {
 			},
 		}
 
-		fp.deleteEndpointConnections(input)
+		utilproxy.DeleteEndpointConnections(fp.exec, fp.serviceMap, input, fp.clearConntrackEntries)
 
 		// For UDP and SCTP connections, check the executed conntrack command
 		var expExecs int
@@ -424,7 +424,7 @@ func TestDeleteEndpointConnectionsIPv6(t *testing.T) {
 			},
 		}
 
-		fp.deleteEndpointConnections(input)
+		utilproxy.DeleteEndpointConnections(fp.exec, fp.serviceMap, input, fp.clearConntrackEntries)
 
 		// For UDP and SCTP connections, check the executed conntrack command
 		var expExecs int
@@ -515,6 +515,7 @@ func NewFakeProxier(ipt utiliptables.Interface) *Proxier {
 		natRules:                 utilproxy.LineBuffer{},
 		nodePortAddresses:        make([]string, 0),
 		networkInterfacer:        utilproxytest.NewFakeNetwork(),
+		clearConntrackEntries:    conntrack.ClearEntriesForPortNAT,
 	}
 	p.setInitialized(true)
 	p.syncRunner = async.NewBoundedFrequencyRunner("test-sync-runner", p.syncProxyRules, 0, time.Minute, 1)
